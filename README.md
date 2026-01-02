@@ -5,7 +5,7 @@ WebRestAPI - это проект созданный от лени изучать
 
 Пример кода:
 
-```
+```python
 import asyncio
 from WebRestAPI import (
     APIServer, APIConfiguration,
@@ -42,8 +42,8 @@ async def func_delete():
 
 async def main():
     await app.run()
-```
 
 if __name__ == '__main__':
     asyncio.run(main())
 ```
+
