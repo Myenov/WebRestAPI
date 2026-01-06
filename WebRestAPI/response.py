@@ -1,45 +1,102 @@
+import json
+import WebRestAPI
+
 class HTTPResponse:
-    @staticmethod
-    def build_response(response_dict):
-        status_code = response_dict.get('status_code', 200)
-        status_text = response_dict.get('status_text', 'OK')
-        http_version = response_dict.get('http_version', 'HTTP/1.1')
+    def __init__(self, content=None, status_code: int = 200,
+                 headers: dict = None, media_type: str = None):
+        self.content = content
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.media_type = media_type
 
-        headers = response_dict.get('headers', {}).copy()
+        if media_type and 'Content-Type' not in self.headers:
+            self.headers['Content-Type'] = media_type
 
-        body = b''
-        if 'json' in response_dict:
-            import json
-            body = json.dumps(response_dict['json']).encode('utf-8')
-            headers['Content-Type'] = 'application/json; charset=utf-8'
+    def build(self):
+        if isinstance(self.content, dict):
+            body = json.dumps(self.content, ensure_ascii=False).encode('utf-8')
+            if 'Content-Type' not in self.headers:
+                self.headers['Content-Type'] = 'application/json'
+        elif isinstance(self.content, str):
+            body = self.content.encode('utf-8')
+            if 'Content-Type' not in self.headers:
+                self.headers['Content-Type'] = 'text/html; charset=utf-8'
+        elif isinstance(self.content, bytes):
+            body = self.content
+        elif self.content is None:
+            body = b''
+        else:
+            body = str(self.content).encode('utf-8')
+            if 'Content-Type' not in self.headers:
+                self.headers['Content-Type'] = 'text/plain'
 
-        elif 'html' in response_dict:
-            body = response_dict['html'].encode('utf-8')
-            headers['Content-Type'] = 'text/html; charset=utf-8'
+        if 'Content-Length' not in self.headers:
+            self.headers['Content-Length'] = str(len(body))
 
-        elif 'text' in response_dict:
-            body = response_dict['text'].encode('utf-8')
-            headers['Content-Type'] = 'text/plain; charset=utf-8'
+        if 'Server' not in self.headers:
+            self.headers['Server'] = f'WebRestAPI/v{WebRestAPI.__version__}'
 
-        elif 'body' in response_dict:
-            if isinstance(response_dict['body'], str):
-                body = response_dict['body'].encode('utf-8')
-            else:
-                body = response_dict['body']
+        if 'Connection' not in self.headers:
+            self.headers['Connection'] = 'close'
 
-        if 'Content-Length' not in headers and body:
-            headers['Content-Length'] = str(len(body))
+        status_phrases = {
+            200: "OK",
+            201: "Created",
+            400: "Bad Request",
+            404: "Not Found",
+            500: "Internal Server Error"
+        }
+        status_text = status_phrases.get(self.status_code, "Unknown")
 
-        if 'Server' not in headers:
-            headers['Server'] = 'WebRestAPI/0.0.1'
-
-        if 'Connection' not in headers:
-            headers['Connection'] = 'close'
-
-        lines = [f"{http_version} {status_code} {status_text}"]
-        for k, v in headers.items():
+        lines = [f"HTTP/1.1 {self.status_code} {status_text}"]
+        for k, v in self.headers.items():
             lines.append(f"{k}: {v}")
+        lines.append('\r\n')
 
-        lines.append('')
         response_str = '\r\n'.join(lines)
         return response_str.encode('utf-8') + body
+
+    @staticmethod
+    def JSONResponse(content, status_code: int = 200, headers: dict = None):
+        if headers is None:
+            headers = {}
+
+        if 'Content-Type' not in headers:
+            headers['Content-Type'] = 'application/json'
+
+        return HTTPResponse(
+            content=content,
+            status_code=status_code,
+            headers=headers,
+            media_type='application/json'
+        )
+
+    @staticmethod
+    def HTMLResponse(content, status_code: int = 200, headers: dict = None):
+        if headers is None:
+            headers = {}
+
+        if 'Content-Type' not in headers:
+            headers['Content-Type'] = 'text/html; charset=utf-8'
+
+        return HTTPResponse(
+            content=content,
+            status_code=status_code,
+            headers=headers,
+            media_type='text/html'
+        )
+
+    @staticmethod
+    def PlainTextResponse(content, status_code: int = 200, headers: dict = None):
+        if headers is None:
+            headers = {}
+
+        if 'Content-Type' not in headers:
+            headers['Content-Type'] = 'text/plain; charset=utf-8'
+
+        return HTTPResponse(
+            content=content,
+            status_code=status_code,
+            headers=headers,
+            media_type='text/plain'
+        )

@@ -2,16 +2,19 @@ from datetime import datetime
 
 from WebRestAPI.template_string.template import Template
 
-error_l: list[int] = [31,40,1]
-log_l: list[int] = [37,40,1]
-debug_l: list[int] = [33,40,1]
+error_l: list[int] = [31, 40, 1]
+log_l: list[int] = [37, 40, 1]
+debug_l: list[int] = [33, 40, 1]
 
-class Log:
+
+
+
+class APIlog:
     @staticmethod
     def BasicConfig(error: list[int] | None = None,
                     log: list[int] | None = None,
                     debug: list[int] | None = None):
-        global  error_l, log_l , debug_l
+        global error_l, log_l, debug_l
         if error is not None:
             error_l = error
         if log_l is not None:
@@ -23,7 +26,8 @@ class Log:
     def error(text: str):
         now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         print(Template("$CODE $TIME <= $text").connect(
-            {"CODE": "\033["+str(error_l[2])+";"+str(error_l[0])+";"+str(error_l[1])+"m", "TIME": now,"text":text}
+            {"CODE": "\033[" + str(error_l[2]) + ";" + str(error_l[0]) + ";" + str(error_l[1]) + "m", "TIME": now,
+             "text": text}
         ))
 
     @staticmethod
