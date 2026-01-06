@@ -3,7 +3,7 @@ from WebRestAPI.routes import Router
 class APIConfiguration:
     def __init__(self,
                  host: str = "localhost", port: int = 8000,queue: int = 15,
-                 routes: list['Router'] | None = None ,debug: bool = False,
+                 routes: list['Router'] = [] ,debug: bool = False,
                  IPversion: str = "IPv4" , protocol: str = "TCP",setblocking: bool = True,
                  protocol_number: int = 0, fileno: None = None,client_timeout: int = 30,
                  read_request_byte_size: int = 1024):

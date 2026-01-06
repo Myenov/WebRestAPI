@@ -1,276 +1,225 @@
 from WebRestAPI.requests import HTTPRequest
 from WebRestAPI.configurate import APIConfiguration
-from WebRestAPI.exception_code import (
-    InvalidIPversionError, InvalidProtocolError,
-    InvalidUrlError
-)
-from WebRestAPI.log.log import Log
 from WebRestAPI.response import HTTPResponse
+from WebRestAPI.log.log import APIlog
 
 import socket
 import asyncio
+import sys
 
 
 class APIServer:
     def __init__(self, cfg: APIConfiguration):
-        self.cfg: APIConfiguration = cfg
+        self.cfg = cfg
         self._socket = None
-        self._url: dict = {}
+        self._routes = {}
+        self._path_routes = []
+        self._running = False
 
     async def run(self):
-        self._socket = socket.socket(
-            family=self._is_valid_ip_version(),
-            type=self._is_valid_protocol(),
-            proto=self.cfg.protocol_number,
-            fileno=self.cfg.fileno
-        )
-        self._load_urls()
+        try:
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._socket.bind((self.cfg.host, self.cfg.port))
+            self._socket.listen(self.cfg.queue)
 
-        self._socket.bind((self.cfg.host, self.cfg.port))
-        self._socket.listen(self.cfg.queue)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            APIlog.log(f"Socket bound to {self.cfg.host}:{self.cfg.port}")
+
+        except OSError as e:
+            APIlog.error(f"Error binding to {self.cfg.host}:{self.cfg.port}: {e}")
+            return
+
+        self._load_routes()
+
+        APIlog.log(f"Server started on http://{self.cfg.host}:{self.cfg.port}")
+
+        if sys.platform == "win32":
+            await self._run_windows()
+        else:
+            await self._run_unix()
+
+    async def _run_windows(self):
+        self._running = True
         self._socket.setblocking(False)
 
-        if self.cfg.debug:
-            Log.debug(f"Server started on {self.cfg.host}:{self.cfg.port}")
+        while self._running:
+            try:
+                client_socket, addr = self._socket.accept()
+                client_socket.setblocking(False)
+                asyncio.create_task(self._handle_client(client_socket, addr))
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                APIlog.error(f"Accept error: {e}")
+                await asyncio.sleep(0.1)
 
-        try:
-            loop = asyncio.get_event_loop()
-
-            while True:
-                try:
-                    client_socket, addr = await loop.sock_accept(self._socket)
-                    if self.cfg.debug:
-                        Log.debug(f"New connection from: {addr}")
-                    asyncio.create_task(self.handle_client(client_socket, addr))
-                except Exception as e:
-                    if self.cfg.debug:
-                        Log.error(f"Error accepting connection: {e}")
-                    continue
-        except KeyboardInterrupt:
-            if self.cfg.debug:
-                Log.debug("Server stopped by user")
-        finally:
+        self._running = False
+        if self._socket:
             self._socket.close()
 
-    async def handle_client(self, client_socket, addr):
+    async def _run_unix(self):
+        self._socket.setblocking(False)
+        self._running = True
+        loop = asyncio.get_event_loop()
+
+        while self._running:
+            try:
+                client_socket, addr = await loop.sock_accept(self._socket)
+                client_socket.setblocking(False)
+                asyncio.create_task(self._handle_client(client_socket, addr))
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                APIlog.error(f"Accept error: {e}")
+                await asyncio.sleep(0.1)
+
+        self._running = False
+        if self._socket:
+            self._socket.close()
+
+    async def _handle_client(self, client_socket, addr):
         try:
             loop = asyncio.get_event_loop()
             request_data = b''
+
             while True:
                 try:
                     chunk = await loop.sock_recv(client_socket, 4096)
                     if not chunk:
                         break
-
                     request_data += chunk
                     if b'\r\n\r\n' in request_data:
-                        headers_end = request_data.find(b'\r\n\r\n')
-                        headers_part = request_data[:headers_end]
-                        content_length = 0
-                        headers_text = headers_part.decode('utf-8', errors='ignore')
-                        for line in headers_text.split('\r\n'):
-                            if line.lower().startswith('content-length:'):
-                                try:
-                                    content_length = int(line.split(':')[1].strip())
-                                except:
-                                    pass
-                        body_start = headers_end + 4
-                        if len(request_data) - body_start >= content_length:
-                            break
-                        else:
-                            continue
+                        break
+                except BlockingIOError:
+                    if request_data:
+                        break
+                    await asyncio.sleep(0.001)
+                    continue
+                except socket.timeout:
+                    break
+                except Exception as e:
+                    break
 
-                except ConnectionResetError:
-                    break
-                except asyncio.TimeoutError:
-                    break
             if not request_data:
                 client_socket.close()
                 return
-            if self.cfg.debug:
-                Log.debug(f"Full request from {addr} ({len(request_data)} bytes)")
-                Log.debug(f"Request start: {request_data[:200]}...")
 
-            try:
-                request = HTTPRequest(request_data)
-                req = request.request_json
-                if not req or 'method' not in req or 'path' not in req:
-                    if self.cfg.debug:
-                        Log.error(f"Invalid request from {addr}")
-                    response = self._create_error_response(400, "Bad Request")
-                else:
-                    method = req.get("method", "").upper()
-                    path = req.get("path", "")
-                    if path == "/favicon.ico":
-                        response = self._create_favicon_response()
-                    else:
-                        url_key = f"{method} {path}"
-                        if self.cfg.debug:
-                            Log.debug(f"Parsed request: {url_key}")
-                        if url_key in self._url:
-                            handler = self._url[url_key]
-                            if asyncio.iscoroutinefunction(handler):
-                                handler_result = await handler()
-                            else:
-                                handler_result = handler()
-                            response = self._process_handler_result(handler_result)
-                        else:
-                            if self.cfg.debug:
-                                Log.debug(f"Route not found: {url_key}")
-                            response = self._create_error_response(404, f"Route {path} not found")
-                await loop.sock_sendall(client_socket, response)
-                headers_text = request_data.decode('utf-8', errors='ignore')
-                connection_close = True
+            APIlog.debug(f"Received {len(request_data)} bytes from {addr}")
+            response_data = await self._process_request(request_data)
 
-                for line in headers_text.split('\r\n'):
-                    if line.lower().startswith('connection:'):
-                        if 'keep-alive' in line.lower():
-                            connection_close = False
-                        break
-
-                if connection_close:
-                    client_socket.close()
-                else:
-                    client_socket.close()
-
-            except Exception as e:
-                if self.cfg.debug:
-                    Log.error(f"Error processing request from {addr}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                error_response = self._create_error_response(500, "Internal Server Error")
-                await loop.sock_sendall(client_socket, error_response)
-                client_socket.close()
+            if response_data:
+                try:
+                    total_sent = 0
+                    while total_sent < len(response_data):
+                        sent = client_socket.send(response_data[total_sent:])
+                        if sent == 0:
+                            break
+                        total_sent += sent
+                    APIlog.debug(f"Sent {total_sent} bytes to {addr}")
+                except Exception as e:
+                    APIlog.error(f"Send error to {addr}: {e}")
 
         except Exception as e:
-            if self.cfg.debug:
-                Log.error(f"Error with client {addr}: {e}")
+            APIlog.error(f"Client error: {e}")
         finally:
             try:
                 client_socket.close()
             except:
                 pass
 
-    def _create_error_response(self, status_code: int, message: str = ""):
-        status_phrases = {
-            200: "OK",
-            201: "Created",
-            400: "Bad Request",
-            404: "Not Found",
-            500: "Internal Server Error",
-        }
+    async def _process_request(self, request_data):
+        try:
+            request = HTTPRequest(request_data)
+            req = request.request_json
 
-        status_text = status_phrases.get(status_code, "Unknown")
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>{status_code} {status_text}</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
-                h1 {{ color: #333; }}
-            </style>
-        </head>
-        <body>
-            <div class="error">{status_code} {status_text}</div>
-            <h1>{message}</h1>
-            <p>WebRestAPI Server</p>
-        </body>
-        </html>
-        """
+            if not req:
+                return HTTPResponse.PlainTextResponse("Bad Request", status_code=400).build()
 
-        return HTTPResponse.build_response({
-            'status_code': status_code,
-            'status_text': status_text,
-            'html': html_content
-        })
+            method = req.get("method", "").upper()
+            path = req.get("path", "")
 
-    def _create_favicon_response(self):
-        empty_favicon = (
-            b'\x00\x00\x01\x00\x01\x00\x01\x01\x00\x00\x01\x00\x18\x00'
-            b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+            APIlog.debug(f"Processing {method} {path}")
+
+            if path == "/favicon.ico":
+                return await self._handle_favicon()
+
+            route_key = f"{method} {path}"
+
+            route_info = None
+            path_params = {}
+
+            if route_key in self._routes:
+                route_info = self._routes[route_key]
+            else:
+                for pattern_info in self._path_routes:
+                    if pattern_info['method'] == method:
+                        match = pattern_info['pattern'].match(path)
+                        if match:
+                            route_info = pattern_info
+                            path_params = match.groupdict()
+                            req['path_params'] = path_params
+                            break
+
+            if not route_info:
+                return HTTPResponse.HTMLResponse(
+                    f"<h1>404 Not Found</h1><p>Route {path} not found</p>",
+                    status_code=404
+                ).build()
+
+            handler = route_info['handler']
+            response = await handler(request)
+
+            if isinstance(response, HTTPResponse):
+                return response.build()
+            elif isinstance(response, dict):
+                return HTTPResponse.JSONResponse(response).build()
+            elif isinstance(response, str):
+                return HTTPResponse.HTMLResponse(response).build()
+            else:
+                return HTTPResponse.JSONResponse({"result": response}).build()
+
+        except Exception as e:
+            APIlog.error(f"Process error: {e}")
+            import traceback
+            traceback.print_exc()
+            return HTTPResponse.JSONResponse(
+                {"error": "Internal Server Error"},
+                status_code=500
+            ).build()
+
+    async def _handle_favicon(self):
+        favicon_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10\x00\x00\x00\x10\x08\x02\x00\x00\x00\x90\x91h6\x00\x00\x00\x19IDATx\x9cc\xf8\xcf\x00\x05\x8c\x0c\x0c\x0c\x8c\x8c\x8c\x0c\x0c\x0c\x0c\x0c\x0c\x8c\x0c\x18\x00\x00\x00\xff\xff\x03\x00\xb4\x9f\x05\xf6\x00\x00\x00\x00IEND\xaeB`\x82'
+
+        response = HTTPResponse(
+            content=favicon_data,
+            status_code=200,
+            headers={
+                'Content-Type': 'image/png',
+                'Cache-Control': 'public, max-age=86400'
+            }
         )
+        return response.build()
 
-        return HTTPResponse.build_response({
-            'status_code': 200,
-            'status_text': 'OK',
-            'headers': {
-                'Content-Type': 'image/x-icon',
-                'Content-Length': str(len(empty_favicon))
-            },
-            'body': empty_favicon
-        })
-
-    def _process_handler_result(self, result):
-        if isinstance(result, bytes):
-            return result
-        elif isinstance(result, str):
-            try:
-                return result.encode('utf-8')
-            except:
-                return HTTPResponse.build_response({
-                    'status_code': 200,
-                    'status_text': 'OK',
-                    'text': result
-                })
-        elif isinstance(result, dict):
-            return HTTPResponse.build_response(result)
-        else:
-            return HTTPResponse.build_response({
-                'status_code': 200,
-                'status_text': 'OK',
-                'text': str(result)
-            })
-
-    def _load_urls(self) -> None:
+    def _load_routes(self):
         if not self.cfg.routes:
-            if self.cfg.debug:
-                Log.debug("No routes configured")
             return
 
-        for rout in self.cfg.routes:
-            urls_dict = rout.get_urls()
-            if not isinstance(urls_dict, dict):
-                raise TypeError(f"Expected dict from get_urls(), got {type(urls_dict)}")
-            for url_pattern, handler_func in urls_dict.items():
-                if not isinstance(url_pattern, str):
-                    raise TypeError(f"URL pattern must be string, got {type(url_pattern)}")
-                parts = url_pattern.split(" ")
-                if len(parts) < 2:
-                    raise InvalidUrlError(f"Invalid URL format: {url_pattern}")
+        for router in self.cfg.routes:
+            routes_dict = router.get_urls()
+            self._routes.update(routes_dict)
 
-                if not callable(handler_func):
-                    raise TypeError(f"Handler must be callable, got {type(handler_func)}")
-                self._url[url_pattern] = handler_func
+            path_patterns = router.get_path_patterns()
+            self._path_routes.extend(path_patterns)
+
+        APIlog.log(f"Loaded {len(self._routes)} route(s) and {len(self._path_routes)} path route(s)")
 
         if self.cfg.debug:
-            Log.debug(f"Loaded {len(self._url)} URLs: {list(self._url.keys())}")
-
-    def _is_valid_ip_version(self):
-        if self.cfg.IPv == "IPv4":
-            family = socket.AF_INET
-        elif self.cfg.IPv == "IPv6":
-            family = socket.AF_INET6
-        elif self.cfg.IPv == "LOCALE":
-            family = socket.AF_UNIX
-        else:
-            raise InvalidIPversionError()
-
-        if self.cfg.debug:
-            Log.debug(f"The selected internet protocol version is - {self.cfg.IPv}")
-
-        return family
-
-    def _is_valid_protocol(self):
-        if self.cfg.protocol == "TCP":
-            type_ = socket.SOCK_STREAM
-        elif self.cfg.protocol == "UDP":
-            type_ = socket.SOCK_DGRAM
-        else:
-            raise InvalidProtocolError()
-
-        if self.cfg.debug:
-            Log.debug(f"The selected data transfer protocol is - {self.cfg.protocol}")
-
-        return type_
+            APIlog.debug("Available routes:")
+            for route in sorted(self._routes.keys()):
+                APIlog.debug(f"  • {route}")
+            for pattern in self._path_routes:
+                APIlog.debug(f"  • {pattern['method']} {pattern['path']}")
