@@ -1,11 +1,14 @@
+from pathlib import Path
 from WebRestAPI.requests import HTTPRequest
 from WebRestAPI.configurate import APIConfiguration
 from WebRestAPI.response import HTTPResponse
 from WebRestAPI.log.log import APIlog
+from WebRestAPI.files.files import File, FileTypes
 
 import socket
 import asyncio
 import sys
+import time
 
 
 class APIServer:
@@ -20,85 +23,76 @@ class APIServer:
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._socket.setblocking(self.cfg.setblocking)
             self._socket.bind((self.cfg.host, self.cfg.port))
             self._socket.listen(self.cfg.queue)
 
-            APIlog.log(f"Socket bound to {self.cfg.host}:{self.cfg.port}")
+            APIlog.log(f"Server bound to {self.cfg.host}:{self.cfg.port}")
 
         except OSError as e:
             APIlog.error(f"Error binding to {self.cfg.host}:{self.cfg.port}: {e}")
             return
 
         self._load_routes()
-
         APIlog.log(f"Server started on http://{self.cfg.host}:{self.cfg.port}")
-
-        if sys.platform == "win32":
-            await self._run_windows()
-        else:
-            await self._run_unix()
-
-    async def _run_windows(self):
         self._running = True
-        self._socket.setblocking(False)
 
-        while self._running:
-            try:
-                client_socket, addr = self._socket.accept()
-                client_socket.setblocking(False)
-                asyncio.create_task(self._handle_client(client_socket, addr))
-            except BlockingIOError:
-                await asyncio.sleep(0.01)
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                APIlog.error(f"Accept error: {e}")
-                await asyncio.sleep(0.1)
+        try:
+            while self._running:
+                try:
+                    if self.cfg.setblocking:
+                        client_socket, addr = self._socket.accept()
+                    else:
+                        try:
+                            client_socket, addr = self._socket.accept()
+                        except BlockingIOError:
+                            await asyncio.sleep(0.01)
+                            continue
 
-        self._running = False
-        if self._socket:
-            self._socket.close()
+                    client_socket.settimeout(self.cfg.client_timeout)
+                    client_socket.setblocking(False)
+                    asyncio.create_task(self._handle_client(client_socket, addr))
 
-    async def _run_unix(self):
-        self._socket.setblocking(False)
-        self._running = True
-        loop = asyncio.get_event_loop()
+                except socket.timeout:
+                    continue
+                except OSError as e:
+                    if e.errno == socket.EBADF:
+                        break
+                    await asyncio.sleep(0.1)
+                except KeyboardInterrupt:
+                    break
+                except Exception as e:
+                    APIlog.error(f"Accept error: {e}")
+                    await asyncio.sleep(0.1)
 
-        while self._running:
-            try:
-                client_socket, addr = await loop.sock_accept(self._socket)
-                client_socket.setblocking(False)
-                asyncio.create_task(self._handle_client(client_socket, addr))
-            except BlockingIOError:
-                await asyncio.sleep(0.01)
-            except KeyboardInterrupt:
-                break
-            except Exception as e:
-                APIlog.error(f"Accept error: {e}")
-                await asyncio.sleep(0.1)
-
-        self._running = False
-        if self._socket:
-            self._socket.close()
+        except KeyboardInterrupt:
+            APIlog.log("Server stopped by user")
+        finally:
+            self._running = False
+            if self._socket:
+                self._socket.close()
 
     async def _handle_client(self, client_socket, addr):
         try:
             loop = asyncio.get_event_loop()
             request_data = b''
+            start_time = time.time()
 
-            while True:
+            while time.time() - start_time < self.cfg.client_timeout:
                 try:
-                    chunk = await loop.sock_recv(client_socket, 4096)
+                    chunk = await loop.sock_recv(client_socket, self.cfg.read_request_byte_size)
                     if not chunk:
                         break
                     request_data += chunk
                     if b'\r\n\r\n' in request_data:
-                        break
+                        content_length = self._get_content_length(request_data)
+                        body_start = request_data.find(b'\r\n\r\n') + 4
+                        if len(request_data) >= body_start + content_length:
+                            break
                 except BlockingIOError:
                     if request_data:
                         break
                     await asyncio.sleep(0.001)
-                    continue
                 except socket.timeout:
                     break
                 except Exception as e:
@@ -131,6 +125,17 @@ class APIServer:
             except:
                 pass
 
+    def _get_content_length(self, request_data: bytes) -> int:
+        try:
+            headers_part = request_data.split(b'\r\n\r\n')[0]
+            lines = headers_part.split(b'\r\n')
+            for line in lines:
+                if line.lower().startswith(b'content-length:'):
+                    return int(line.split(b':')[1].strip())
+        except:
+            pass
+        return 0
+
     async def _process_request(self, request_data):
         try:
             request = HTTPRequest(request_data)
@@ -144,11 +149,10 @@ class APIServer:
 
             APIlog.debug(f"Processing {method} {path}")
 
-            if path == "/favicon.ico":
+            if not self.cfg.user_favicon and path == "/favicon.ico":
                 return await self._handle_favicon()
 
             route_key = f"{method} {path}"
-
             route_info = None
             path_params = {}
 
@@ -192,13 +196,18 @@ class APIServer:
             ).build()
 
     async def _handle_favicon(self):
-        favicon_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x10\x00\x00\x00\x10\x08\x02\x00\x00\x00\x90\x91h6\x00\x00\x00\x19IDATx\x9cc\xf8\xcf\x00\x05\x8c\x0c\x0c\x0c\x8c\x8c\x8c\x0c\x0c\x0c\x0c\x0c\x0c\x8c\x0c\x18\x00\x00\x00\xff\xff\x03\x00\xb4\x9f\x05\xf6\x00\x00\x00\x00IEND\xaeB`\x82'
+        favicon_path = Path(__file__).resolve().parent / "favicon.ico"
+
+        try:
+            favicon_data = await File.read(str(favicon_path), "rb")
+        except:
+            favicon_data = b''
 
         response = HTTPResponse(
             content=favicon_data,
             status_code=200,
             headers={
-                'Content-Type': 'image/png',
+                'Content-Type': 'image/x-icon',
                 'Cache-Control': 'public, max-age=86400'
             }
         )

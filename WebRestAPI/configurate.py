@@ -6,7 +6,7 @@ class APIConfiguration:
                  routes: list['Router'] = [] ,debug: bool = False,
                  IPversion: str = "IPv4" , protocol: str = "TCP",setblocking: bool = True,
                  protocol_number: int = 0, fileno: None = None,client_timeout: int = 30,
-                 read_request_byte_size: int = 1024):
+                 read_request_byte_size: int = 1024 , user_favicon: bool = False):
 
         self.host: str = host
         self.port: int = port
@@ -20,6 +20,7 @@ class APIConfiguration:
         self.protocol: str = protocol
         self.debug: bool = debug
         self.fileno = fileno
+        self.user_favicon: bool = user_favicon
 
     def include_router(self, route: 'Router') -> None:
         self.routes.append(route)

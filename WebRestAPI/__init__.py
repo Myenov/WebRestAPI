@@ -1,4 +1,3 @@
-import os
 from WebRestAPI.requests import HTTPRequest
 from WebRestAPI.response import HTTPResponse
 from WebRestAPI.routes import Router
@@ -6,7 +5,7 @@ from WebRestAPI.server import APIServer
 from WebRestAPI.configurate import APIConfiguration
 from WebRestAPI.log import APIlog , FuncLog
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 
 JSONResponse = HTTPResponse.JSONResponse

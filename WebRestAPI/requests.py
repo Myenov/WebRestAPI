@@ -1,5 +1,8 @@
 import json
 import urllib.parse
+import re
+from typing import Dict, Any, Optional
+
 
 class HTTPRequest:
     def __init__(self, raw_request: bytes):
@@ -11,11 +14,12 @@ class HTTPRequest:
         self.body = b''
         self.json_body = None
         self.form_data = {}
+        self.files = {}
         self.query_params = {}
         self.path_params = {}
         self.request_json = self._parse_request(raw_request)
 
-    def _parse_request(self, raw_request: bytes) -> dict:
+    def _parse_request(self, raw_request: bytes) -> Dict[str, Any]:
         try:
             if not raw_request:
                 return {}
@@ -72,6 +76,8 @@ class HTTPRequest:
                         self.form_data = self._parse_query_string(body_text)
                     except:
                         self.form_data = {}
+                elif 'multipart/form-data' in content_type:
+                    self._parse_multipart_form_data(content_type)
 
             return {
                 'method': self.method,
@@ -81,17 +87,17 @@ class HTTPRequest:
                 'body': self.body.decode('utf-8', errors='ignore'),
                 'json_body': self.json_body,
                 'form_data': self.form_data,
+                'files': self.files,
                 'query_params': self.query_params,
                 'path_params': self.path_params
             }
 
         except Exception as e:
-            print(f"Parse error: {e}")
             import traceback
             traceback.print_exc()
             return {}
 
-    def _parse_query_string(self, query_string: str) -> dict:
+    def _parse_query_string(self, query_string: str) -> Dict[str, str]:
         params = {}
         try:
             pairs = query_string.split('&')
@@ -104,3 +110,46 @@ class HTTPRequest:
         except:
             pass
         return params
+
+    def _parse_multipart_form_data(self, content_type: str):
+        boundary_match = re.search(r'boundary=(.+)', content_type)
+        if not boundary_match:
+            return
+
+        boundary = boundary_match.group(1).encode()
+        parts = self.body.split(b'--' + boundary)
+
+        for part in parts:
+            if not part or part == b'--\r\n':
+                continue
+
+            headers_end = part.find(b'\r\n\r\n')
+            if headers_end == -1:
+                continue
+
+            headers_part = part[:headers_end]
+            content = part[headers_end + 4:-2]
+
+            headers = {}
+            for line in headers_part.split(b'\r\n'):
+                line_str = line.decode('utf-8', errors='ignore')
+                if ': ' in line_str:
+                    key, value = line_str.split(': ', 1)
+                    headers[key.lower()] = value
+
+            content_disposition = headers.get('content-disposition', '')
+            name_match = re.search(r'name="([^"]+)"', content_disposition)
+            filename_match = re.search(r'filename="([^"]+)"', content_disposition)
+
+            if name_match:
+                name = name_match.group(1)
+                if filename_match:
+                    filename = filename_match.group(1)
+                    self.files[name] = {
+                        'filename': filename,
+                        'content': content,
+                        'content_type': headers.get('content-type', 'application/octet-stream'),
+                        'size': len(content)
+                    }
+                else:
+                    self.form_data[name] = content.decode('utf-8', errors='ignore')
